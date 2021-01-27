@@ -1,16 +1,31 @@
+import open3d as o3d
+print("finished loading open3d")
 import params
-
+print("finished loading params")
 import torch
 import torch.utils.data
+print("finished loading torch")
 import numpy as np
+print("finished loading numpy")
 import gym
 from gym import spaces
-import open3d as o3d
+print("finished loading gym")
+
 from pathlib import Path
+print("finished loading pathlib")
 import pyrender
+import argparse
+from PIL import Image
+
+
+print("before loading FVS modules")
+import sys
+sys.path.append("FreeViewSynthesis/")
 from FreeViewSynthesis import ext
 from FreeViewSynthesis.exp import modules
 from FreeViewSynthesis.exp.dataset import load
+print("finish loading FVS modules")
+
 
 
 
@@ -19,34 +34,35 @@ class EnvTruckDiscrete(gym.Env):
     The environment for reconstructing the truck in tat dataset
     """
     def __init__(self,
-                height,
-                weight,
-                n_channels,
+                net_name,
+                net_path,
                 pw_dir,
-                net_name
+                width = 980,
+                height = 546,
+                n_channels = 3
                 ):
                 
         super(EnvTruckDiscrete, self).__init__()
+        print("super initialization done")
 
         # set up basics fo the envrionments
-        self.action_space = spaces.Discrete(N_DISCRETE_ACTIONS)
+        self.action_space = spaces.Discrete(params.N_DISCRETE_ACTIONS)
         self.action_map = params.action_map
 
         self.height = height
-        self.weight = weight
+        self.width = width
         self.n_channels = n_channels
-        self.observation_space = spaces.Box(low=0, high=255, shape=(self.height, self.weight, self.n_channels), dtype=np.uint8)
+        self.observation_space = spaces.Box(low=0, high=255, shape=(self.height, self.width, self.n_channels), dtype=np.uint8)
 
         self.start_pose = self.get_start_pose(self.action_space.n)
         self.pose_prev = self.start_pose
-        self.num_total_points = counts.shape[0]
 
         # set up FVS nework
-        self.eval_device = "cuda:0"
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.pad_width = 16
         self.n_nbs = 5
         self.invalid_depth_to_inf = True
-        self.bwd_depth_thresh=0.1
+        self.bwd_depth_thresh = 0.1
 
         if net_name == "fixed_identity_unet4.64.3":
             net_f = lambda: modules.get_fixed_net(
@@ -86,8 +102,12 @@ class EnvTruckDiscrete(gym.Env):
             )
         else:
             raise Exception("invalid net")
-
+        
+        print("try loading network")
         self.net = net_f()
+        state_dict = torch.load(str(net_path), map_location=self.device)
+        self.net.load_state_dict(state_dict)
+        print("network loaded")
 
         # pw directory
         pw_dir = Path(pw_dir)
@@ -99,7 +119,13 @@ class EnvTruckDiscrete(gym.Env):
         self.src_ts = np.load(pw_dir / "ts.npy")
 
         src_dm_paths = sorted(pw_dir.glob("dm_*.npy"))
-        self.src_dms = load_depth_maps(src_dm_paths)
+        dms = []
+        for dm_path in src_dm_paths:
+            dms.append(np.load(dm_path))        
+        self.src_dms = np.array(dms)
+
+        src_counts = np.load(pw_dir / "counts.npy")
+        self.num_total_points = src_counts.shape[0]
 
         # mesh
         mesh_path = pw_dir.parent / "delaunay_photometric.ply"
@@ -124,7 +150,8 @@ class EnvTruckDiscrete(gym.Env):
         image_new, count = self.get_new_data_from_pose(pose_new)
 
         observation = image_new
-        reward = self.get_reward(count, pose_change)
+        # reward = self.get_reward(count, pose_change)
+        reward = 1
         done = self.check_done()
 
         self.pose_prev = pose_new
@@ -133,11 +160,11 @@ class EnvTruckDiscrete(gym.Env):
 
 
     def reset(self):
-        poes_new = self.get_start_pose(self.n_discrete_actions)
+        pose_new = self.get_start_pose(self.action_space.n)
         self.start_pose = pose_new
         self.pose_prev = self.start_pose
 
-        image_new, count = get_new_data_from_pose(pose_new)
+        image_new, count = self.get_new_data_from_pose(pose_new)
         observation= image_new
         return observation
 
@@ -168,12 +195,13 @@ class EnvTruckDiscrete(gym.Env):
         depth = self.render_depth_map_mesh(K, R, t, self.height, self.width)
 
         tgt_dm, tgt_K, tgt_R, tgt_t = depth, K, R, t
-        
-        src_dms = self.src_dms
+
         src_Ks = self.src_Ks
         src_Rs = self.src_Rs
-        src_ts = self.src_ts
+        src_ts = self.src_ts       
+        src_dms = self.src_dms
 
+        print("running count_nbs")
         count = ext.preprocess.count_nbs(
             tgt_dm,
             tgt_K,
@@ -185,21 +213,41 @@ class EnvTruckDiscrete(gym.Env):
             src_ts,
             bwd_depth_thresh=0.1,
         )
+        print("count")
+        print(count)
 
+        tgt_dm = self.pad(tgt_dm)
+
+        # make nbs using count
+        nbs = np.argsort(count)[::-1]
+        nbs = nbs[: self.n_nbs]
+
+        print("print nbs")
+        print(nbs)
+        
+        nb_src_dms = np.array([self.src_dms[ii] for ii in nbs])
+        nb_src_dms = self.pad(nb_src_dms)
+
+        nb_src_Ks = np.array([self.src_Ks[ii] for ii in nbs])
+        nb_src_Rs = np.array([self.src_Rs[ii] for ii in nbs])
+        nb_src_ts = np.array([self.src_ts[ii] for ii in nbs])
+
+        print("running get_sampling_map")
         patch = np.array((0, tgt_dm.shape[0], 0, tgt_dm.shape[1]), dtype=np.int32)
         sampling_maps, valid_depth_masks, valid_map_masks = ext.preprocess.get_sampling_map(
             tgt_dm,
             tgt_K,
             tgt_R,
             tgt_t,
-            src_dms,
-            src_Ks,
-            src_Rs,
-            src_ts,
+            nb_src_dms,
+            nb_src_Ks,
+            nb_src_Rs,
+            nb_src_ts,
             patch,
             self.bwd_depth_thresh,
             self.invalid_depth_to_inf,
         )
+        print("get_sampling_map finished")
 
         # make data ready for network to infer
         data = {}
@@ -218,12 +266,26 @@ class EnvTruckDiscrete(gym.Env):
         tgt_width = min(tgt_dm.shape[1], patch[3]) - patch[2]
         data["tgt"] = np.zeros((3, tgt_height, tgt_width), dtype=np.float32)
 
+        # convert numpy array to tensor
+        data_tensor = {}
+        for k, v in data.items():
+            v_tensor = torch.from_numpy(v).unsqueeze(0)
+            data_tensor[k] = v_tensor.to(self.device).requires_grad_(requires_grad=False)
+
+        print("data check")
+        for k, v in data_tensor.items():
+            print("{} | {} | {}".format(k, v.dtype, v.shape))
+            print(v)
+
+        import pickle
+        pickle.dump(data_tensor, open("/home/kudo/devs/ReconstructRL/state_data.p","wb"))
+
         # network inference
         torch.cuda.empty_cache()
         with torch.no_grad():
-            self.net = self.net.to(self.eval_device)
+            self.net = self.net.to(self.device)
             self.net.eval()
-        image = self.net(**data)
+            image = self.net(**data_tensor)
 
         return image, count
 
@@ -242,7 +304,7 @@ class EnvTruckDiscrete(gym.Env):
         """
         Function to check if the current run is done
         """
-        pass
+        return True
 
 
     def render_depth_map_mesh(
@@ -261,10 +323,10 @@ class EnvTruckDiscrete(gym.Env):
         mesh = pyrender.Mesh(
             primitives=[
                 pyrender.Primitive(
-                    positions=verts,
-                    normals=normals,
-                    color_0=colors,
-                    indices=faces,
+                    positions=self.verts,
+                    normals=self.normals,
+                    color_0=self.colors,
+                    indices=self.faces,
                     mode=pyrender.GLTF.TRIANGLES,
                 )
             ],
@@ -320,3 +382,45 @@ class EnvTruckDiscrete(gym.Env):
             im_p[..., :h, :w] = im
             im = im_p
         return im
+
+
+def load_pickle_data(pickle_data_path):
+    import pickle
+    data = pickle.load(open(pickle_data_path, "rb"))
+    return data
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--net-name", type=str, required=True)
+    parser.add_argument("--net-path", type=str, required=True)
+    parser.add_argument("-d", "--pw-dir", type=str, required=True)
+    args = parser.parse_args()
+
+    pw_dir = args.pw_dir
+    net_name = args.net_name
+    net_path = args.net_path
+
+
+    # data = load_pickle_data("state_data.p")
+    # print(data)
+
+    print("loading args finished")
+    env_truck = EnvTruckDiscrete(net_name, net_path, pw_dir)
+    print("env initialization finished")
+
+    print("reset env starts")
+    out = env_truck.reset()
+    print("reset env ends")
+
+    im = out['out']
+    im = im.detach().to("cpu").numpy()
+    im = (np.clip(im, -1, 1) + 1) / 2
+    im = im.transpose(0, 2, 3, 1)
+
+    out_im = (255 * im[0]).astype(np.uint8)
+    print('im array')
+    print(out_im)
+    print('image shape')
+    print(out_im.shape)
+    Image.fromarray(out_im).save('obs.jpg')

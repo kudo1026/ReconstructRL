@@ -1,3 +1,6 @@
+import numpy as np
+from numpy import array
+
 N_DISCRETE_ACTIONS = 36
 TOTAL_AZIMUTH_ANGLE = 360
 
