@@ -1,61 +1,76 @@
 import open3d as o3d
-print("finished loading open3d")
 import params
-print("finished loading params")
 import torch
 import torch.utils.data
-print("finished loading torch")
 import numpy as np
-print("finished loading numpy")
 import gym
 from gym import spaces
-print("finished loading gym")
-
 from pathlib import Path
-print("finished loading pathlib")
 import pyrender
 import argparse
 from PIL import Image
 
-
-print("before loading FVS modules")
 import sys
 sys.path.append("FreeViewSynthesis/")
 from FreeViewSynthesis import ext
 from FreeViewSynthesis.exp import modules
 from FreeViewSynthesis.exp.dataset import load
-print("finish loading FVS modules")
-
-
 
 
 class EnvTruckDiscrete(gym.Env):
     """
-    The environment for reconstructing the truck in tat dataset
+    The discrete environment for reconstructing the truck in tat dataset
     """
     def __init__(self,
                 net_name,
                 net_path,
                 pw_dir,
-                width = 980,
-                height = 546,
-                n_channels = 3
+                verbose=False,
+                vis=False
                 ):
                 
         super(EnvTruckDiscrete, self).__init__()
-        print("super initialization done")
+
+        #set up output option
+        self.verbose = verbose
+        self.vis = vis
+
+        # pw directory
+        pw_dir = Path(pw_dir)
+
+        self.src_im_paths = sorted(pw_dir.glob(f"im_*.jpg"))
+        sample_im = np.array(Image.open(self.src_im_paths[0]))
+        self.height, self.width, self.n_channels = sample_im.shape
+        self.num_total_points = self.height * self.width
+
+        self.src_Ks = np.load(pw_dir / "Ks.npy")
+        self.src_Rs = np.load(pw_dir / "Rs.npy")
+        self.src_ts = np.load(pw_dir / "ts.npy")
+
+        src_dm_paths = sorted(pw_dir.glob("dm_*.npy"))
+        dms = []
+        for dm_path in src_dm_paths:
+            dms.append(np.load(dm_path))        
+        self.src_dms = np.array(dms)
+
+        self.src_counts = np.load(pw_dir / "counts.npy")
 
         # set up basics fo the envrionments
         self.action_space = spaces.Discrete(params.N_DISCRETE_ACTIONS)
         self.action_map = params.action_map
 
-        self.height = height
-        self.width = width
-        self.n_channels = n_channels
         self.observation_space = spaces.Box(low=0, high=255, shape=(self.height, self.width, self.n_channels), dtype=np.uint8)
 
-        self.start_pose = self.get_start_pose(self.action_space.n)
-        self.pose_prev = self.start_pose
+        # mesh
+        mesh_path = pw_dir.parent / "delaunay_photometric.ply"
+        self.mesh = o3d.io.read_triangle_mesh(str(mesh_path))
+        self.mesh.compute_vertex_normals()
+        self.mesh.paint_uniform_color((0.7, 0.7, 0.7))
+
+        self.verts = np.asarray(self.mesh.vertices).astype(np.float32)
+        self.faces = np.asarray(self.mesh.triangles).astype(np.int32)
+        self.colors = np.asarray(self.mesh.vertex_colors).astype(np.float32)
+        self.normals = np.asarray(self.mesh.vertex_normals).astype(np.float32)
 
         # set up FVS nework
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -103,68 +118,47 @@ class EnvTruckDiscrete(gym.Env):
         else:
             raise Exception("invalid net")
         
-        print("try loading network")
+        if self.verbose:
+            print("try loading network")
         self.net = net_f()
         state_dict = torch.load(str(net_path), map_location=self.device)
         self.net.load_state_dict(state_dict)
-        print("network loaded")
-
-        # pw directory
-        pw_dir = Path(pw_dir)
-
-        self.src_im_paths = sorted(pw_dir.glob(f"im_*.jpg"))
-
-        self.src_Ks = np.load(pw_dir / "Ks.npy")
-        self.src_Rs = np.load(pw_dir / "Rs.npy")
-        self.src_ts = np.load(pw_dir / "ts.npy")
-
-        src_dm_paths = sorted(pw_dir.glob("dm_*.npy"))
-        dms = []
-        for dm_path in src_dm_paths:
-            dms.append(np.load(dm_path))        
-        self.src_dms = np.array(dms)
-
-        src_counts = np.load(pw_dir / "counts.npy")
-        self.num_total_points = src_counts.shape[0]
-
-        # mesh
-        mesh_path = pw_dir.parent / "delaunay_photometric.ply"
-        self.mesh = o3d.io.read_triangle_mesh(str(mesh_path))
-        self.mesh.compute_vertex_normals()
-        self.mesh.paint_uniform_color((0.7, 0.7, 0.7))
-
-        self.verts = np.asarray(self.mesh.vertices).astype(np.float32)
-        self.faces = np.asarray(self.mesh.triangles).astype(np.int32)
-        self.colors = np.asarray(self.mesh.vertex_colors).astype(np.float32)
-        self.normals = np.asarray(self.mesh.vertex_normals).astype(np.float32)
+        if self.verbose:
+            print("network loaded")
 
         # parameters for RL    
         self.step_cost = -0.1
-        self.seen_point_list = []
 
 
     def step(self, action = 0):
         pose_new = self.action_map[action]
-        pose_change = pose_new - self.pose_prev
 
-        image_new, count = self.get_new_data_from_pose(pose_new)
+        image_new, dm_new, K_new, R_new, t_new = self.get_data_from_new_pose(pose_new)
 
+        # get step output
         observation = image_new
-        # reward = self.get_reward(count, pose_change)
-        reward = 1
-        done = self.check_done()
+        reward, done = self.get_reward(dm_new, K_new, R_new, t_new)
+        info = {}
 
-        self.pose_prev = pose_new
+        # post process
+        self.hist_dms = np.concatenate((self.hist_dms, dm_new[np.newaxis, :]))
+        self.hist_Ks = np.concatenate((self.hist_Ks, K_new[np.newaxis, :]))
+        self.hist_Rs = np.concatenate((self.hist_Rs, R_new[np.newaxis, :]))
+        self.hist_ts = np.concatenate((self.hist_ts, t_new[np.newaxis, :]))
         
         return observation, reward, done, info
 
 
     def reset(self):
-        pose_new = self.get_start_pose(self.action_space.n)
-        self.start_pose = pose_new
-        self.pose_prev = self.start_pose
+        pose_new = self.get_random_pose(self.action_space.n)
 
-        image_new, count = self.get_new_data_from_pose(pose_new)
+        image_new, dm_new, K_new, R_new, t_new = self.get_data_from_new_pose(pose_new)
+
+        self.hist_dms = dm_new[np.newaxis, :]
+        self.hist_Ks = K_new[np.newaxis, :]
+        self.hist_Rs = R_new[np.newaxis, :]
+        self.hist_ts = t_new[np.newaxis, :]
+
         observation= image_new
         return observation
 
@@ -179,14 +173,24 @@ class EnvTruckDiscrete(gym.Env):
     #     return 
 
     
-    def get_start_pose(self, n_actions):
+    def get_pose_change_cost(self, pose_new, pose_prev):
+        """
+        Get the cost for pose change
+        """
+        K_new, R_new, t_new = pose_new
+        K_prev, R_prev, t_prev = pose_prev
+
+        return self.step_cost * np.sum(np.abs(t_new - t_prev))
+
+    
+    def get_random_pose(self, n_actions):
         """
         Generate initial start pose
         """
         return self.action_map[np.random.randint(n_actions)]
 
 
-    def get_new_data_from_pose(self, pose):
+    def get_data_from_new_pose(self, pose):
         """
         Use Free View Synthesis to generate new data from given pose, including image and count
         """
@@ -201,7 +205,8 @@ class EnvTruckDiscrete(gym.Env):
         src_ts = self.src_ts       
         src_dms = self.src_dms
 
-        print("running count_nbs")
+        if self.verbose:
+            print("running count_nbs")
         count = ext.preprocess.count_nbs(
             tgt_dm,
             tgt_K,
@@ -213,8 +218,9 @@ class EnvTruckDiscrete(gym.Env):
             src_ts,
             bwd_depth_thresh=0.1,
         )
-        print("count")
-        print(count)
+        if self.verbose:
+            print("count")
+            print(count)
 
         tgt_dm = self.pad(tgt_dm)
 
@@ -222,8 +228,9 @@ class EnvTruckDiscrete(gym.Env):
         nbs = np.argsort(count)[::-1]
         nbs = nbs[: self.n_nbs]
 
-        print("print nbs")
-        print(nbs)
+        if self.verbose:
+            print("print nbs")
+            print(nbs)
         
         nb_src_dms = np.array([self.src_dms[ii] for ii in nbs])
         nb_src_dms = self.pad(nb_src_dms)
@@ -232,7 +239,8 @@ class EnvTruckDiscrete(gym.Env):
         nb_src_Rs = np.array([self.src_Rs[ii] for ii in nbs])
         nb_src_ts = np.array([self.src_ts[ii] for ii in nbs])
 
-        print("running get_sampling_map")
+        if self.verbose:
+            print("running get_sampling_map")
         patch = np.array((0, tgt_dm.shape[0], 0, tgt_dm.shape[1]), dtype=np.int32)
         sampling_maps, valid_depth_masks, valid_map_masks = ext.preprocess.get_sampling_map(
             tgt_dm,
@@ -247,7 +255,8 @@ class EnvTruckDiscrete(gym.Env):
             self.bwd_depth_thresh,
             self.invalid_depth_to_inf,
         )
-        print("get_sampling_map finished")
+        if self.verbose:
+            print("get_sampling_map finished")
 
         # make data ready for network to infer
         data = {}
@@ -272,39 +281,79 @@ class EnvTruckDiscrete(gym.Env):
             v_tensor = torch.from_numpy(v).unsqueeze(0)
             data_tensor[k] = v_tensor.to(self.device).requires_grad_(requires_grad=False)
 
-        print("data check")
-        for k, v in data_tensor.items():
-            print("{} | {} | {}".format(k, v.dtype, v.shape))
-            print(v)
-
-        import pickle
-        pickle.dump(data_tensor, open("/home/kudo/devs/ReconstructRL/state_data.p","wb"))
+        if self.verbose:
+            print("data check")
+            for k, v in data_tensor.items():
+                print("{} | {} | {}".format(k, v.dtype, v.shape))
+                print(v)
 
         # network inference
         torch.cuda.empty_cache()
         with torch.no_grad():
             self.net = self.net.to(self.device)
             self.net.eval()
-            image = self.net(**data_tensor)
+            out = self.net(**data_tensor)
 
-        return image, count
+        # post process the output image
+        im = out['out']
+        im = im.detach().to("cpu").numpy()
+        im = (np.clip(im, -1, 1) + 1) / 2
+        im = im.transpose(0, 2, 3, 1)
+
+        out_im = (255 * im[0]).astype(np.uint8)
+        if self.verbose:
+            print('im array')
+            print(out_im)
+            print('image shape')
+            print(out_im.shape)
+        if self.vis:
+            Image.fromarray(out_im).save('obs.jpg')
+
+        return out_im, depth, K, R, t
 
     
-    def get_reward(self, num_new_points, pose_change):
+    def get_reward(self, tgt_dm, tgt_K, tgt_R, tgt_t, bwd_depth_thresh=0.1):
         """
-        Calculate rewards based on number of new points and the cost for 
+        Calculate rewards based on number of new points and the cost for pose change
         """
-        reward = num_new_points / self.num_total_points
-        reward += pose_change * self.step_cost
 
-        return reward
+        # calculate number of new points catched by the new view
+        hist_dms = self.hist_dms
+        hist_Ks = self.hist_Ks
+        hist_Rs = self.hist_Rs
+        hist_ts = self.hist_ts
 
+        count_per_pix = ext.preprocess.count_nbs_per_pix(
+            tgt_dm, 
+            tgt_K, 
+            tgt_R, 
+            tgt_t, 
+            hist_dms, 
+            hist_Ks, 
+            hist_Rs, 
+            hist_ts,
+            bwd_depth_thresh
+        )
 
-    def check_done(self):
-        """
-        Function to check if the current run is done
-        """
-        return True
+        num_new_points = np.sum(count_per_pix==0)
+        percent_new_points = num_new_points / self.num_total_points
+        print("percent of new points: {}".format(percent_new_points))
+
+        # if not many new points are detected then done
+        done = False
+        if percent_new_points < 0.05:
+            done = True
+
+        # get pose change cost
+        pose_new = (tgt_K, tgt_R, tgt_t)
+        pose_prev = (hist_Ks[-1], hist_Rs[-1], hist_ts[-1])
+        pose_change_cost = self.get_pose_change_cost(pose_new, pose_prev)
+        print("pose change cost: {}".format(pose_change_cost))
+
+        # calculate total rewards
+        reward = percent_new_points + pose_change_cost
+
+        return reward, done
 
 
     def render_depth_map_mesh(
@@ -316,7 +365,6 @@ class EnvTruckDiscrete(gym.Env):
         width,
         znear=0.05,
         zfar=1500,
-        write_vis=False,
     ):
 
         scene = pyrender.Scene()
@@ -360,10 +408,10 @@ class EnvTruckDiscrete(gym.Env):
         render = pyrender.OffscreenRenderer(self.width, self.height)
         color, depth = render.render(scene)
 
-        if write_vis:
-            depth[depth <= 0] = np.NaN
-            depth = co.plt.image_colorcode(depth)
-            imwrite(dm_path.with_suffix(".jpg"), depth)
+        # if self.vis:
+        #     depth[depth <= 0] = np.NaN
+        #     depth = co.plt.image_colorcode(depth)
+        #     imwrite(dm_path.with_suffix(".jpg"), depth)
 
         return depth
 
@@ -395,32 +443,33 @@ if __name__ == "__main__":
     parser.add_argument("--net-name", type=str, required=True)
     parser.add_argument("--net-path", type=str, required=True)
     parser.add_argument("-d", "--pw-dir", type=str, required=True)
+    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--vis", action="store_true")
     args = parser.parse_args()
 
     pw_dir = args.pw_dir
     net_name = args.net_name
     net_path = args.net_path
+    verbose = args.verbose
+    vis = args.vis
 
-
-    # data = load_pickle_data("state_data.p")
-    # print(data)
-
-    print("loading args finished")
-    env_truck = EnvTruckDiscrete(net_name, net_path, pw_dir)
-    print("env initialization finished")
+    print("init env starts")
+    env_truck = EnvTruckDiscrete(net_name, net_path, pw_dir, verbose, vis)
+    print("init env ends")
 
     print("reset env starts")
     out = env_truck.reset()
     print("reset env ends")
 
-    im = out['out']
-    im = im.detach().to("cpu").numpy()
-    im = (np.clip(im, -1, 1) + 1) / 2
-    im = im.transpose(0, 2, 3, 1)
+    print("run steps starts")
+    for i in range(10):
+        print("-------------------------------------------")
+        print("iter = {}".format(i))
+        print("-------------------------------------------")
+        action = np.random.randint(env_truck.action_space.n)
+        print("action: {}".format(action))
+        observation, reward, done, info = env_truck.step(action)
 
-    out_im = (255 * im[0]).astype(np.uint8)
-    print('im array')
-    print(out_im)
-    print('image shape')
-    print(out_im.shape)
-    Image.fromarray(out_im).save('obs.jpg')
+        if done:
+            break
+    print("run steps ends")
