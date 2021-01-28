@@ -21,9 +21,9 @@ class EnvTruckDiscrete(gym.Env):
     The discrete environment for reconstructing the truck in tat dataset
     """
     def __init__(self,
-                net_name,
-                net_path,
-                pw_dir,
+                net_name=params.net_name,
+                net_path=params.net_path,
+                pw_dir=params.pw_dir,
                 verbose=False,
                 vis=False
                 ):
@@ -117,12 +117,12 @@ class EnvTruckDiscrete(gym.Env):
         else:
             raise Exception("invalid net")
         
-        if self.verbose:
+        if self.verbose == 2:
             print("try loading network")
         self.net = net_f()
         state_dict = torch.load(str(net_path), map_location=self.device)
         self.net.load_state_dict(state_dict)
-        if self.verbose:
+        if self.verbose == 2:
             print("network loaded")
 
         # parameters for RL    
@@ -131,6 +131,11 @@ class EnvTruckDiscrete(gym.Env):
 
     def step(self, action = 0):
         self.step_count += 1
+
+        if self.verbose >= 1:
+            print("-------------------------------------------")
+            print("step: {} | action: {}".format(self.step_count, action))
+            print("-------------------------------------------")
 
         pose_new = self.action_map[action]
 
@@ -155,7 +160,10 @@ class EnvTruckDiscrete(gym.Env):
 
         action = np.random.randint(self.action_space.n)
         pose_new = self.action_map[action]
-        print("reset action: {}".format(action))
+        if self.verbose >= 1:
+            print("-------------------------------------------")
+            print("reset with initial action: {}".format(action))
+            print("-------------------------------------------")
 
         image_new, dm_new, K_new, R_new, t_new = self.get_data_from_new_pose(pose_new)
 
@@ -201,7 +209,7 @@ class EnvTruckDiscrete(gym.Env):
         src_ts = self.src_ts       
         src_dms = self.src_dms
 
-        if self.verbose:
+        if self.verbose == 2:
             print("running count_nbs")
         count = ext.preprocess.count_nbs(
             tgt_dm,
@@ -214,7 +222,7 @@ class EnvTruckDiscrete(gym.Env):
             src_ts,
             bwd_depth_thresh=0.1,
         )
-        if self.verbose:
+        if self.verbose == 2:
             print("count")
             print(count)
 
@@ -224,7 +232,7 @@ class EnvTruckDiscrete(gym.Env):
         nbs = np.argsort(count)[::-1]
         nbs = nbs[: self.n_nbs]
 
-        if self.verbose:
+        if self.verbose == 2:
             print("print nbs")
             print(nbs)
         
@@ -235,7 +243,7 @@ class EnvTruckDiscrete(gym.Env):
         nb_src_Rs = np.array([self.src_Rs[ii] for ii in nbs])
         nb_src_ts = np.array([self.src_ts[ii] for ii in nbs])
 
-        if self.verbose:
+        if self.verbose == 2:
             print("running get_sampling_map")
         patch = np.array((0, tgt_dm.shape[0], 0, tgt_dm.shape[1]), dtype=np.int32)
         sampling_maps, valid_depth_masks, valid_map_masks = ext.preprocess.get_sampling_map(
@@ -251,7 +259,7 @@ class EnvTruckDiscrete(gym.Env):
             self.bwd_depth_thresh,
             self.invalid_depth_to_inf,
         )
-        if self.verbose:
+        if self.verbose == 2:
             print("get_sampling_map finished")
 
         # make data ready for network to infer
@@ -277,7 +285,7 @@ class EnvTruckDiscrete(gym.Env):
             v_tensor = torch.from_numpy(v).unsqueeze(0)
             data_tensor[k] = v_tensor.to(self.device).requires_grad_(requires_grad=False)
 
-        if self.verbose:
+        if self.verbose == 2:
             print("data check")
             for k, v in data_tensor.items():
                 print("{} | {} | {}".format(k, v.dtype, v.shape))
@@ -297,9 +305,9 @@ class EnvTruckDiscrete(gym.Env):
         im = im.transpose(0, 2, 3, 1)
 
         out_im = (255 * im[0]).astype(np.uint8)
-        if self.verbose:
-            print('im array')
-            print(out_im)
+        if self.verbose == 2:
+            # print('im array')
+            # print(out_im)
             print('image shape')
             print(out_im.shape)
         if self.vis:
@@ -333,7 +341,8 @@ class EnvTruckDiscrete(gym.Env):
 
         num_new_points = np.sum(count_per_pix==0)
         percent_new_points = num_new_points / self.num_total_points
-        print("percent of new points: {}".format(percent_new_points))
+        if self.verbose >= 1:
+            print("percent of new points: {}".format(percent_new_points))
 
         # if not many new points are detected then done
         done = False
@@ -344,10 +353,13 @@ class EnvTruckDiscrete(gym.Env):
         pose_new = (tgt_K, tgt_R, tgt_t)
         pose_prev = (hist_Ks[-1], hist_Rs[-1], hist_ts[-1])
         pose_change_cost = self.get_pose_change_cost(pose_new, pose_prev)
-        print("pose change cost: {}".format(pose_change_cost))
+        if self.verbose >= 1:
+            print("pose change cost: {}".format(pose_change_cost))
 
         # calculate total rewards
         reward = percent_new_points + pose_change_cost
+        if self.verbose >= 1:
+            print("reward: {}".format(reward))
 
         return reward, done
 
@@ -463,23 +475,31 @@ if __name__ == "__main__":
     # verbose = args.verbose
     # vis = args.vis  
 
-    print("init env starts")
+    if config.verbose == 2:
+        print("init env starts")
     env_truck = EnvTruckDiscrete(params.net_name, params.net_path, params.pw_dir, config.verbose, config.vis)
-    print("init env ends")
+    if config.verbose == 2:
+        print("init env ends")
 
-    print("reset env starts")
+    if config.verbose == 2:
+        print("reset env starts")
     out = env_truck.reset()
-    print("reset env ends")
+    if config.verbose == 2:
+        print("reset env ends")
 
-    print("run steps starts")
-    for i in range(10):
-        print("-------------------------------------------")
-        print("iter = {}".format(i))
-        print("-------------------------------------------")
+    if config.verbose == 2:
+        print("run steps starts")
+
+    for i in range(20):
+        # print("-------------------------------------------")
+        # print("iter = {}".format(i))
+        # print("-------------------------------------------")
         action = np.random.randint(env_truck.action_space.n)
-        print("action: {}".format(action))
+        # print("action: {}".format(action))
         observation, reward, done, info = env_truck.step(action)
 
         if done:
             break
-    print("run steps ends")
+
+    if config.verbose == 2:
+        print("run steps ends")

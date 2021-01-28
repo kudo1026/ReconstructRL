@@ -9,5 +9,5 @@ pad_width = None
 n_nbs = 5
 invalid_depth_to_inf = True
 bwd_depth_thresh = 0.1
-verbose = True
-vis = True
+verbose = 1
+vis = False
