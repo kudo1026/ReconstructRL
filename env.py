@@ -10,11 +10,12 @@ import pyrender
 import argparse
 from PIL import Image
 
-import sys
-sys.path.append("FreeViewSynthesis/")
+import modules
 from FreeViewSynthesis import ext
-from FreeViewSynthesis.exp import modules
-from FreeViewSynthesis.exp.dataset import load
+
+# import sys
+# sys.path.append("FreeViewSynthesis/")
+# from FreeViewSynthesis.exp import modules
 
 
 class EnvTruckDiscrete(gym.Env):
@@ -268,7 +269,7 @@ class EnvTruckDiscrete(gym.Env):
         nbs = np.argsort(count)[::-1]
         nbs = nbs[: self.n_nbs]
 
-        srcs = np.array([self.pad(load(self.src_im_paths[ii])) for ii in nbs])
+        srcs = np.array([self.pad(load_img(self.src_im_paths[ii])) for ii in nbs])
         data["srcs"] = srcs
 
         tgt_height = min(tgt_dm.shape[0], patch[1]) - patch[0]
@@ -436,6 +437,20 @@ def load_pickle_data(pickle_data_path):
     import pickle
     data = pickle.load(open(pickle_data_path, "rb"))
     return data
+
+
+def load_img(p, height=None, width=None):
+    im = Image.open(p)
+    im = np.array(im)
+    if (
+        height is not None
+        and width is not None
+        and (im.shape[0] != height or im.shape[1] != width)
+    ):
+        raise Exception("invalid size of image")
+    im = (im.astype(np.float32) / 255) * 2 - 1
+    im = im.transpose(2, 0, 1)
+    return im
 
 
 if __name__ == "__main__":
