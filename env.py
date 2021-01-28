@@ -13,10 +13,6 @@ from PIL import Image
 import modules
 from FreeViewSynthesis import ext
 
-# import sys
-# sys.path.append("FreeViewSynthesis/")
-# from FreeViewSynthesis.exp import modules
-
 
 class EnvTruckDiscrete(gym.Env):
     """
@@ -454,19 +450,21 @@ def load_img(p, height=None, width=None):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--net-name", type=str, required=True)
-    parser.add_argument("--net-path", type=str, required=True)
-    parser.add_argument("-d", "--pw-dir", type=str, required=True)
-    parser.add_argument("--verbose", action="store_true")
-    parser.add_argument("--vis", action="store_true")
-    args = parser.parse_args()
+    # parser = argparse.ArgumentParser()
+    # parser.add_argument("--net-name", type=str, required=True)
+    # parser.add_argument("--net-path", type=str, required=True)
+    # parser.add_argument("-d", "--pw-dir", type=str, required=True)
+    # parser.add_argument("--verbose", action="store_true")
+    # parser.add_argument("--vis", action="store_true")
+    # args = parser.parse_args()
 
-    pw_dir = args.pw_dir
-    net_name = args.net_name
-    net_path = args.net_path
-    verbose = args.verbose
-    vis = args.vis
+    # pw_dir = args.pw_dir
+    # net_name = args.net_name
+    # net_path = args.net_path
+    # verbose = args.verbose
+    # vis = args.vis
+
+    from config import *
 
     print("init env starts")
     env_truck = EnvTruckDiscrete(net_name, net_path, pw_dir, verbose, vis)
