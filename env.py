@@ -147,7 +147,9 @@ class EnvTruckDiscrete(gym.Env):
 
 
     def reset(self):
-        pose_new = self.get_random_pose(self.action_space.n)
+        action = np.random.randint(self.action_space.n)
+        pose_new = self.action_map[action]
+        print("reset action: {}".format(action))
 
         image_new, dm_new, K_new, R_new, t_new = self.get_data_from_new_pose(pose_new)
 
@@ -178,13 +180,6 @@ class EnvTruckDiscrete(gym.Env):
         K_prev, R_prev, t_prev = pose_prev
 
         return self.step_cost * np.sum(np.abs(t_new - t_prev))
-
-    
-    def get_random_pose(self, n_actions):
-        """
-        Generate initial start pose
-        """
-        return self.action_map[np.random.randint(n_actions)]
 
 
     def get_data_from_new_pose(self, pose):
