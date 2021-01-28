@@ -1,5 +1,13 @@
+# params file contain parameters that comes with the environment,
+# and are usually not supposed to be changed
+
 import numpy as np
 from numpy import array
+
+n_nbs = 5
+net_name = "rnn_vgg16unet3_gruunet4.64.3"
+net_path = "/home/kudo/devs/FreeViewSynthesis/exp/experiments/tat_nbs5_s0.25_p192_rnn_vgg16unet3_gruunet4.64.3/net_0000000000749999.params"
+pw_dir = "/home/kudo/external_disk/FVS_data/ibr3d_tat/training/Truck/dense/ibr3d_pw_0.50"
 
 N_DISCRETE_ACTIONS = 36
 TOTAL_AZIMUTH_ANGLE = 360

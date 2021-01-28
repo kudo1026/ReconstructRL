@@ -1,5 +1,5 @@
 import open3d as o3d
-import params
+
 import torch
 import torch.utils.data
 import numpy as np
@@ -10,6 +10,8 @@ import pyrender
 import argparse
 from PIL import Image
 
+import config
+import params
 import modules
 from FreeViewSynthesis import ext
 
@@ -71,10 +73,10 @@ class EnvTruckDiscrete(gym.Env):
 
         # set up FVS nework
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.pad_width = 16
-        self.n_nbs = 5
-        self.invalid_depth_to_inf = True
-        self.bwd_depth_thresh = 0.1
+        self.pad_width = config.pad_width
+        self.n_nbs = params.n_nbs
+        self.invalid_depth_to_inf = config.invalid_depth_to_inf
+        self.bwd_depth_thresh = config.invalid_depth_to_inf
 
         if net_name == "fixed_identity_unet4.64.3":
             net_f = lambda: modules.get_fixed_net(
@@ -128,6 +130,8 @@ class EnvTruckDiscrete(gym.Env):
 
 
     def step(self, action = 0):
+        self.step_count += 1
+
         pose_new = self.action_map[action]
 
         image_new, dm_new, K_new, R_new, t_new = self.get_data_from_new_pose(pose_new)
@@ -147,6 +151,8 @@ class EnvTruckDiscrete(gym.Env):
 
 
     def reset(self):
+        self.step_count = 0
+
         action = np.random.randint(self.action_space.n)
         pose_new = self.action_map[action]
         print("reset action: {}".format(action))
@@ -158,18 +164,16 @@ class EnvTruckDiscrete(gym.Env):
         self.hist_Rs = R_new[np.newaxis, :]
         self.hist_ts = t_new[np.newaxis, :]
 
-        observation= image_new
+        observation = image_new
         return observation
 
 
-    # def render(self, mode='human'):
-    #     ...
-    #     return
+    def render(self, mode='human'):
+        pass
 
 
-    # def close (self):
-    #     ...
-    #     return 
+    def close (self):
+        pass
 
     
     def get_pose_change_cost(self, pose_new, pose_prev):
@@ -277,7 +281,7 @@ class EnvTruckDiscrete(gym.Env):
             print("data check")
             for k, v in data_tensor.items():
                 print("{} | {} | {}".format(k, v.dtype, v.shape))
-                print(v)
+                # print(v)
 
         # network inference
         torch.cuda.empty_cache()
@@ -299,7 +303,7 @@ class EnvTruckDiscrete(gym.Env):
             print('image shape')
             print(out_im.shape)
         if self.vis:
-            Image.fromarray(out_im).save('obs.jpg')
+            Image.fromarray(out_im).save("obs_{}.jpg".format(self.step_count))
 
         return out_im, depth, K, R, t
 
@@ -457,12 +461,10 @@ if __name__ == "__main__":
     # net_name = args.net_name
     # net_path = args.net_path
     # verbose = args.verbose
-    # vis = args.vis
-
-    from config import *
+    # vis = args.vis  
 
     print("init env starts")
-    env_truck = EnvTruckDiscrete(net_name, net_path, pw_dir, verbose, vis)
+    env_truck = EnvTruckDiscrete(params.net_name, params.net_path, params.pw_dir, config.verbose, config.vis)
     print("init env ends")
 
     print("reset env starts")
